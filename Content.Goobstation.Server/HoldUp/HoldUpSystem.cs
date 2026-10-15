@@ -1,160 +1,89 @@
-// SPDX-License-Identifier: AGPL-3.0-or-later
-
-using System;
-
+using System.Linq;
+using Content.Goobstation.Common.Weapons.Ranged;
 using Content.Goobstation.Shared.HoldUp;
-using Content.Goobstation.Maths.FixedPoint;
-
 using Content.Server.Popups;
 using Content.Server.Weapons.Ranged.Systems;
-using Content.Goobstation.Common.Weapons.Ranged;
-
 using Content.Shared.CombatMode;
 using Content.Shared.Interaction;
 using Content.Shared.Mobs.Systems;
 using Content.Shared.Movement.Components;
 using Content.Shared.Movement.Events;
 using Content.Shared.Movement.Systems;
+using Content.Shared.Popups;
 using Content.Shared.Projectiles;
 using Content.Shared.Weapons.Melee;
 using Content.Shared.Weapons.Melee.Events;
 using Content.Shared.Weapons.Ranged.Events;
-
-using System.Linq;
-using Content.Shared.Popups;
 using Robust.Shared.GameObjects;
 using Robust.Shared.IoC;
 using Robust.Shared.Player;
 
 namespace Content.Goobstation.Server.HoldUp;
 
-
 public sealed partial class HoldUpSystem : EntitySystem
 {
     private const float MaxRange = 6f;
     private const float HoldUpDamageMultiplier = 1.10f;
+    private const float ThreatCheckInterval = 0.1f;
 
-    [Dependency]
-    private GunSystem _guns = default!;
+    [Dependency] private GunSystem _guns = default!;
+    [Dependency] private PopupSystem _popup = default!;
+    [Dependency] private SharedInteractionSystem _interaction = default!;
+    [Dependency] private MobStateSystem _mobState = default!;
 
-    [Dependency]
-    private PopupSystem _popup = default!;
-
-    [Dependency]
-    private SharedInteractionSystem _interaction =
-        default!;
-
-    [Dependency]
-    private MobStateSystem _mobState =
-        default!;
+    private float _threatCheckAccumulator;
 
     public override void Initialize()
     {
         base.Initialize();
 
-        SubscribeLocalEvent<CombatModeComponent,
-            HoldUpClickEvent>(OnHoldUpClick);
-
-        SubscribeLocalEvent<HeldUpComponent,
-            MoveInputEvent>(OnMoveInput);
-
-        SubscribeLocalEvent<MeleeWeaponComponent,
-            AttemptMeleeEvent>(OnMeleeAttempt);
-
-        SubscribeLocalEvent<HeldUpComponent,
-            ShotAttemptedEvent>(OnShotAttempt);
-
-        SubscribeLocalEvent<HoldUpPendingShotComponent,
-            AmmoShotUserEvent>(OnAmmoShot);
-
-        SubscribeLocalEvent<HoldUpBonusProjectileComponent,
-            ProjectileHitEvent>(OnProjectileHit);
+        SubscribeLocalEvent<CombatModeComponent, HoldUpClickEvent>(OnHoldUpClick);
+        SubscribeLocalEvent<HeldUpComponent, MoveInputEvent>(OnMoveInput);
+        SubscribeLocalEvent<MeleeWeaponComponent, AttemptMeleeEvent>(OnMeleeAttempt);
+        SubscribeLocalEvent<HeldUpComponent, ShotAttemptedEvent>(OnShotAttempt);
+        SubscribeLocalEvent<HoldUpPendingShotComponent, AmmoShotUserEvent>(OnAmmoShot);
+        SubscribeLocalEvent<HoldUpBonusProjectileComponent, ProjectileHitEvent>(OnProjectileHit);
     }
 
-    private void OnHoldUpClick(
-        EntityUid uid,
-        CombatModeComponent combat,
-        HoldUpClickEvent args)
+    private void OnHoldUpClick(EntityUid uid, CombatModeComponent combat, HoldUpClickEvent args)
     {
-        var aggressor = uid;
-        var target = args.Target;
-
-        if (!combat.IsInCombatMode)
+        if (!combat.IsInCombatMode || TerminatingOrDeleted(args.Target) || uid == args.Target)
             return;
 
-        if (TerminatingOrDeleted(target))
-            return;
-
-        if (aggressor == target)
-            return;
-
-        if (!_guns.TryGetGun(
-                aggressor,
-                out var heldGun))
+        if (!_guns.TryGetGun(uid, out var heldGun))
             return;
 
         var weapon = heldGun.Owner;
 
-        if (TryComp<HeldUpComponent>(
-                target,
-                out var existing) &&
+        if (TryComp<HeldUpComponent>(args.Target, out var existing) &&
             existing.Active &&
-            existing.Aggressor == aggressor)
+            existing.Aggressor == uid)
         {
-            EndHoldUp(target, true);
+            EndHoldUp(args.Target, true);
             return;
         }
 
-        BeginHoldUp(aggressor, target, weapon);
+        BeginHoldUp(uid, args.Target, weapon);
     }
 
-    public bool BeginHoldUp(
-        EntityUid aggressor,
-        EntityUid target,
-        EntityUid weapon)
+    public bool BeginHoldUp(EntityUid aggressor, EntityUid target, EntityUid weapon)
     {
         if (aggressor == target)
             return false;
 
-        if (TerminatingOrDeleted(aggressor) ||
-            TerminatingOrDeleted(target) ||
-            TerminatingOrDeleted(weapon))
+        if (TryComp<HeldUpComponent>(target, out var existing) && existing.Active)
             return false;
 
-        if (!HasComp<ActorComponent>(target))
+        if (!IsThreatValid(aggressor, target, weapon))
             return false;
 
-        if (TryComp<HeldUpComponent>(
-                target,
-                out var existing) &&
-            existing.Active)
-            return false;
-
-        if (!IsThreatValid(
-                aggressor,
-                target,
-                weapon))
-            return false;
-
-        var comp =
-            EnsureComp<HeldUpComponent>(target);
-
+        var comp = EnsureComp<HeldUpComponent>(target);
         comp.Active = true;
         comp.Aggressor = aggressor;
         comp.Weapon = weapon;
-
-        if (TryComp<InputMoverComponent>(
-                target,
-                out var mover))
-        {
-            comp.LastObservedMoveButtons =
-                mover.HeldMoveButtons;
-        }
-        else
-        {
-            comp.LastObservedMoveButtons =
-                MoveButtons.None;
-        }
+        comp.LastObservedMoveButtons = TryComp<InputMoverComponent>(target, out var mover)
+            ? mover.HeldMoveButtons
+            : MoveButtons.None;
 
         _popup.PopupEntity(
             Loc.GetString("hold-up-target-warning"),
@@ -163,71 +92,40 @@ public sealed partial class HoldUpSystem : EntitySystem
             PopupType.LargeCaution);
 
         _popup.PopupEntity(
-            Loc.GetString(
-                "hold-up-aggressor-confirmation"),
+            Loc.GetString("hold-up-aggressor-confirmation"),
             aggressor,
             aggressor);
 
         return true;
     }
 
-    private bool IsThreatValid(
-        EntityUid aggressor,
-        EntityUid target,
-        EntityUid weapon)
+    private bool IsThreatValid(EntityUid aggressor, EntityUid target, EntityUid weapon)
     {
         if (TerminatingOrDeleted(aggressor) ||
             TerminatingOrDeleted(target) ||
             TerminatingOrDeleted(weapon))
             return false;
 
-        if (!HasComp<ActorComponent>(target))
+        if (!HasComp<ActorComponent>(target) || _mobState.IsIncapacitated(aggressor))
             return false;
 
-        if (_mobState.IsIncapacitated(aggressor))
+        if (!TryComp<CombatModeComponent>(aggressor, out var combat) || !combat.IsInCombatMode)
             return false;
 
-        if (!TryComp<CombatModeComponent>(
-                aggressor,
-                out var combat))
+        if (!_guns.TryGetGun(aggressor, out var heldGun) || heldGun.Owner != weapon)
             return false;
 
-        if (!combat.IsInCombatMode)
-            return false;
-
-        if (!_guns.TryGetGun(
-                aggressor,
-                out var heldGun))
-            return false;
-
-        if (heldGun.Owner != weapon)
-            return false;
-
-        if (!_interaction.InRangeUnobstructed(
-                aggressor,
-                target,
-                MaxRange))
-            return false;
-
-        return true;
+        return _interaction.InRangeUnobstructed(aggressor, target, MaxRange);
     }
 
-    public void EndHoldUp(
-        EntityUid target,
-        bool notify = false)
+    public void EndHoldUp(EntityUid target, bool notify = false)
     {
-        if (!TryComp<HeldUpComponent>(
-                target,
-                out var comp))
-            return;
-
-        if (!comp.Active)
+        if (!TryComp<HeldUpComponent>(target, out var comp) || !comp.Active)
             return;
 
         comp.Active = false;
 
-        if (notify &&
-            !TerminatingOrDeleted(target))
+        if (notify && !TerminatingOrDeleted(target))
         {
             _popup.PopupEntity(
                 Loc.GetString("hold-up-ended"),
@@ -238,120 +136,66 @@ public sealed partial class HoldUpSystem : EntitySystem
         RemCompDeferred<HeldUpComponent>(target);
     }
 
-    private void OnMoveInput(
-        EntityUid uid,
-        HeldUpComponent comp,
-        ref MoveInputEvent args)
+    private void OnMoveInput(EntityUid uid, HeldUpComponent comp, ref MoveInputEvent args)
     {
-        if (!comp.Active)
+        if (!comp.Active || args.Entity.Owner != uid)
             return;
 
-        if (args.Entity.Owner != uid)
-            return;
-
-        var current =
-            args.Entity.Comp.HeldMoveButtons;
-
-        var previous =
-            comp.LastObservedMoveButtons;
-
+        var current = args.Entity.Comp.HeldMoveButtons;
+        var previous = comp.LastObservedMoveButtons;
         comp.LastObservedMoveButtons = current;
 
         var newlyPressed = current & ~previous;
-
-        var directions =
-            newlyPressed & MoveButtons.AnyDirection;
-
-        if (directions == MoveButtons.None)
+        if ((newlyPressed & MoveButtons.AnyDirection) == MoveButtons.None)
             return;
 
         PunishBreakingHoldUp(uid);
     }
 
-    private void OnMeleeAttempt(
-        EntityUid uid,
-        MeleeWeaponComponent weapon,
-        ref AttemptMeleeEvent args)
+    private void OnMeleeAttempt(EntityUid uid, MeleeWeaponComponent weapon, ref AttemptMeleeEvent args)
     {
         var attacker = args.User;
-
-        if (!TryComp<HeldUpComponent>(
-                attacker,
-                out var heldUp))
-            return;
-
-        if (!heldUp.Active)
+        if (!TryComp<HeldUpComponent>(attacker, out var heldUp) || !heldUp.Active)
             return;
 
         PunishBreakingHoldUp(attacker);
     }
 
-
-    private void OnShotAttempt(
-        EntityUid uid,
-        HeldUpComponent comp,
-        ref ShotAttemptedEvent args)
+    private void OnShotAttempt(EntityUid uid, HeldUpComponent comp, ref ShotAttemptedEvent args)
     {
-        if (!comp.Active)
-            return;
-
-        if (args.User != uid)
+        if (!comp.Active || args.User != uid)
             return;
 
         PunishBreakingHoldUp(uid);
     }
 
-    public void PunishBreakingHoldUp(
-        EntityUid target)
+    public void PunishBreakingHoldUp(EntityUid target)
     {
-        if (!TryComp<HeldUpComponent>(
-                target,
-                out var comp))
-            return;
-
-        if (!comp.Active)
+        if (!TryComp<HeldUpComponent>(target, out var comp) || !comp.Active)
             return;
 
         var aggressor = comp.Aggressor;
         var weapon = comp.Weapon;
 
-        if (!IsThreatValid(
-                aggressor,
-                target,
-                weapon))
+        if (!IsThreatValid(aggressor, target, weapon))
         {
             EndHoldUp(target, true);
             return;
         }
 
         EndHoldUp(target);
-
-        TryFireAtTarget(
-            aggressor,
-            target,
-            weapon);
+        TryFireAtTarget(aggressor, target, weapon);
     }
 
-    private bool TryFireAtTarget(
-        EntityUid aggressor,
-        EntityUid target,
-        EntityUid weapon)
+    private bool TryFireAtTarget(EntityUid aggressor, EntityUid target, EntityUid weapon)
     {
-        if (!IsThreatValid(
-                aggressor,
-                target,
-                weapon))
+        if (!IsThreatValid(aggressor, target, weapon))
             return false;
 
-        if (!_guns.TryGetGun(
-                aggressor,
-                out var heldGun))
+        if (!_guns.TryGetGun(aggressor, out var heldGun))
             return false;
 
-        var pending =
-            EnsureComp<HoldUpPendingShotComponent>(
-                aggressor);
-
+        var pending = EnsureComp<HoldUpPendingShotComponent>(aggressor);
         pending.Target = target;
         pending.Weapon = weapon;
         pending.Active = true;
@@ -363,9 +207,7 @@ public sealed partial class HoldUpSystem : EntitySystem
             target);
 
         pending.Active = false;
-
-        RemCompDeferred<HoldUpPendingShotComponent>(
-            aggressor);
+        RemCompDeferred<HoldUpPendingShotComponent>(aggressor);
 
         if (!fired)
             return false;
@@ -382,81 +224,55 @@ public sealed partial class HoldUpSystem : EntitySystem
 
         return true;
     }
-    private void OnAmmoShot(
-        EntityUid uid,
-        HoldUpPendingShotComponent comp,
-        AmmoShotUserEvent args)
-    {
-        if (!comp.Active)
-            return;
 
-        if (args.Gun != comp.Weapon)
+    private void OnAmmoShot(EntityUid uid, HoldUpPendingShotComponent comp, AmmoShotUserEvent args)
+    {
+        if (!comp.Active || args.Gun != comp.Weapon)
             return;
 
         foreach (var projectile in args.FiredProjectiles)
         {
-            if (!HasComp<ProjectileComponent>(
-                    projectile))
+            if (!HasComp<ProjectileComponent>(projectile))
                 continue;
 
-            var bonus =
-                EnsureComp<HoldUpBonusProjectileComponent>(
-                    projectile);
-
+            var bonus = EnsureComp<HoldUpBonusProjectileComponent>(projectile);
             bonus.Target = comp.Target;
             bonus.Consumed = false;
-            break;
         }
     }
 
-    private void OnProjectileHit(
-        EntityUid uid,
-        HoldUpBonusProjectileComponent comp,
-        ref ProjectileHitEvent args)
+    private void OnProjectileHit(EntityUid uid, HoldUpBonusProjectileComponent comp, ref ProjectileHitEvent args)
     {
-        if (comp.Consumed)
-            return;
-
-        if (args.Target != comp.Target)
+        if (comp.Consumed || args.Target != comp.Target)
             return;
 
         comp.Consumed = true;
 
-        foreach (var damageType in
-                 args.Damage.DamageDict.Keys.ToArray())
+        foreach (var damageType in args.Damage.DamageDict.Keys.ToArray())
         {
-            var baseDamage =
-                args.Damage.DamageDict[damageType];
-
+            var baseDamage = args.Damage.DamageDict[damageType];
             if (baseDamage <= 0)
                 continue;
 
-            args.Damage.DamageDict[damageType] =
-                baseDamage * HoldUpDamageMultiplier;
+            args.Damage.DamageDict[damageType] = baseDamage * HoldUpDamageMultiplier;
         }
     }
+
     public override void Update(float frameTime)
     {
         base.Update(frameTime);
 
-        var query =
-            EntityQueryEnumerator<HeldUpComponent>();
+        _threatCheckAccumulator += frameTime;
+        if (_threatCheckAccumulator < ThreatCheckInterval)
+            return;
 
-        while (query.MoveNext(
-                   out var target,
-                   out var comp))
+        _threatCheckAccumulator = 0f;
+        var query = EntityQueryEnumerator<HeldUpComponent>();
+
+        while (query.MoveNext(out var target, out var comp))
         {
-            if (!comp.Active)
-                continue;
-
-            // No timer: only cancel an invalid threat.
-            if (!IsThreatValid(
-                    comp.Aggressor,
-                    target,
-                    comp.Weapon))
-            {
+            if (comp.Active && !IsThreatValid(comp.Aggressor, target, comp.Weapon))
                 EndHoldUp(target, true);
-            }
         }
     }
 }
