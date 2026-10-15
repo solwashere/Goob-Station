@@ -52,9 +52,6 @@ public sealed partial class HoldUpSystem : EntitySystem
     {
         base.Initialize();
 
-        Console.WriteLine(
-            "========== HOLDUP SYSTEM LOADED ==========");
-
         SubscribeLocalEvent<CombatModeComponent,
             HoldUpClickEvent>(OnHoldUpClick);
 
@@ -79,8 +76,6 @@ public sealed partial class HoldUpSystem : EntitySystem
         CombatModeComponent combat,
         HoldUpClickEvent args)
     {
-        Log.Info("[HOLDUP DEBUG 8] Server received hold-up event!");
-
         var aggressor = uid;
         var target = args.Target;
 
@@ -367,7 +362,6 @@ public sealed partial class HoldUpSystem : EntitySystem
             Transform(target).Coordinates,
             target);
 
-        // Disable the special-shot marker.
         pending.Active = false;
 
         RemCompDeferred<HoldUpPendingShotComponent>(
