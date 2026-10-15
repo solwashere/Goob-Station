@@ -51,6 +51,7 @@ namespace Content.Shared.Input
         public static readonly BoundKeyFunction SaveItemLocation = "SaveItemLocation";
         public static readonly BoundKeyFunction ThrowItemInHand = "ThrowItemInHand";
         public static readonly BoundKeyFunction TryPullObject = "TryPullObject";
+        public static readonly BoundKeyFunction HoldUpClick = "HoldUpClick";
         public static readonly BoundKeyFunction MovePulledObject = "MovePulledObject";
         public static readonly BoundKeyFunction ReleasePulledObject = "ReleasePulledObject";
         public static readonly BoundKeyFunction MouseMiddle = "MouseMiddle";

@@ -251,6 +251,12 @@ binds:
 - function: ReleasePulledObject
   type: State
   key: H
+- function: HoldUpClick
+  type: State
+  key: MouseRight
+  mod1: Shift
+  canFocus: true
+  priority: 20
 - function: OpenCraftingMenu
   type: State
   key: G

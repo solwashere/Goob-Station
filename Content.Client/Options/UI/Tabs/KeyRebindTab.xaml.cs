@@ -210,6 +210,7 @@ namespace Content.Client.Options.UI.Tabs
             AddButton(ContentKeyFunctions.TryPullObject);
             AddButton(ContentKeyFunctions.MovePulledObject);
             AddButton(ContentKeyFunctions.ReleasePulledObject);
+            AddButton(ContentKeyFunctions.HoldUpClick);
             AddButton(ContentKeyFunctions.Point);
             AddButton(ContentKeyFunctions.RotateObjectClockwise);
             AddButton(ContentKeyFunctions.RotateObjectCounterclockwise);
